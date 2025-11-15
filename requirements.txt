@@ -6,3 +6,4 @@ seaborn
 scipy
 japanize-matplotlib
 plotly
+streamlit_cookies_controller
