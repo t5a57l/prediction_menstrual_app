@@ -4,6 +4,7 @@ import pandas as pd     # データフレーム操作用
 from datetime import datetime, timedelta  # 日付操作
 from scipy import stats  # 統計計算
 import plotly.graph_objects as go  # グラフ描画
+import calendar  # 月カレンダー生成用
 
 # --- ヘルプページの内容を読み込む ---
 def load_help():
@@ -87,39 +88,64 @@ def prob_to_color(prob):
     b = lerp(b1, b2, prob)  # B成分
     return f'rgb({r},{g},{b})'  # RGB形式で返す
 
+
 def create_calendar_heatmap_plotly(df):
-    # 月ごとにヒートマップ形式で生理確率を可視化
-    df['year'] = df['date'].dt.year  # 年を抽出
-    df['month'] = df['date'].dt.month  # 月を抽出
-    df['day'] = df['date'].dt.day  # 日を抽出
-    df['weekday'] = df['date'].dt.weekday  # 曜日を抽出（0=月曜）
-    df['week'] = df['date'].dt.isocalendar().week  # 週番号を抽出
-    months = sorted(df['month'].unique())  # 対象月リスト
-    figs = []  # 各月のグラフ格納リスト
-    for month in months:  # 月ごとに処理
-        month_data = df[df['month'] == month]  # 対象月のデータ抽出
-        pivot = month_data.pivot(index='week', columns='weekday', values='probability')  # ヒートマップ用データ
-        days = month_data.pivot(index='week', columns='weekday', values='day')  # 日付表示用
-        pivot = pivot.iloc[::-1]  # 上下反転（カレンダー表示用）
-        days = days.iloc[::-1]
-        # カスタムカラースケール（グラデーション）
+    # 月ごとにヒートマップ形式で生理確率を可視化（calendar.monthcalendar を使って安定化）
+    df['year'] = df['date'].dt.year
+    df['month'] = df['date'].dt.month
+    df['day'] = df['date'].dt.day
+    df['weekday'] = df['date'].dt.weekday  # 0=月曜
+
+    # 年月の時系列順に処理（Period でソート）
+    df['year_month'] = df['date'].dt.to_period('M')
+    year_months = sorted(df['year_month'].unique())
+    figs = []
+    months_out = []
+
+    for ym in year_months:
+        year = int(ym.year)
+        month = int(ym.month)
+        months_out.append((year, month))
+
+        # 月ごとのデータを辞書化（日 -> probability）
+        month_data = df[df['date'].dt.to_period('M') == ym]
+        prob_map = {int(d.day): float(p) for d, p in zip(month_data['date'], month_data['probability'])}
+
+        # calendar.monthcalendar: 各週が月曜始まりで0を含む（該当月外の日は0）
+        month_matrix = calendar.monthcalendar(year, month)  # list of weeks (list of 7 ints)
+        # z行列（確率）、day 行列（表示用日付）
+        z = []
+        days = []
+        for week in month_matrix:
+            z_row = []
+            day_row = []
+            for day in week:
+                if day == 0:
+                    z_row.append(None)   # 非該当セルは None (Plotly は NaN/None を空セルにする)
+                    day_row.append(None)
+                else:
+                    z_row.append(prob_map.get(day, None))
+                    day_row.append(day)
+            z.append(z_row)
+            days.append(day_row)
+
+        # ここで month_matrix の順序は月の先頭週 -> 最終週 なので、そのまま使う（先頭週が上に来る）
         custom_colorscale = [
             [0.0, prob_to_color(0.0)],
             [0.5, prob_to_color(0.5)],
             [1.0, prob_to_color(1.0)]
         ]
-        annotations = []  # アノテーション（各日付・確率表示）
-        for i, week in enumerate(pivot.index):  # 週ごと
-            for j, wd in enumerate(pivot.columns):  # 曜日ごと
-                val = pivot.iloc[i, j]  # 確率値
-                day = days.iloc[i, j]   # 日付
-                if not pd.isna(val):  # データが存在する場合
-                    font_color = 'black' if val < 0.7 else 'white'  # 高確率は白文字
-                    font_weight = 'bold' if val >= 0.7 else 'normal'  # 高確率は太字
+
+        # アノテーション作成（行: 0.., 列: 0..6）
+        annotations = []
+        for i, (z_row, day_row) in enumerate(zip(z, days)):
+            for j, (val, day) in enumerate(zip(z_row, day_row)):
+                if val is not None and not pd.isna(val):
+                    font_color = 'black' if val < 0.7 else 'white'
                     annotations.append(
                         dict(
                             x=j, y=i,
-                            text=f"<b>{int(day)}</b><br><span style='font-size:13px;'>{val:.2f}</span>",  # 日付と確率
+                            text=f"<b>{int(day)}</b><br><span style='font-size:13px;'>{val:.2f}</span>",
                             showarrow=False,
                             font=dict(size=14, color=font_color, family='sans-serif'),
                             align='center',
@@ -127,23 +153,26 @@ def create_calendar_heatmap_plotly(df):
                             opacity=0.8
                         )
                     )
-        # Plotlyヒートマップ作成
+
         fig = go.Figure(data=go.Heatmap(
-            z=pivot.values,  # 確率値
-            x=['月','火','水','木','金','土','日'],  # 曜日ラベル
-            colorscale=custom_colorscale,  # カラースケール
-            zmin=0, zmax=1,  # 色の範囲
-            colorbar=dict(title='生理確率')  # カラーバー
+            z=z,
+            x=['月','火','水','木','金','土','日'],
+            y=[f"w{i}" for i in range(len(z))],  # 内部的な y ラベル（表示しない）
+            colorscale=custom_colorscale,
+            zmin=0, zmax=1,
+            colorbar=dict(title='生理確率'),
+            hoverinfo='skip'
         ))
         fig.update_layout(
-            title=f"{month_data['year'].iloc[0]}年{month}月",  # タイトル
-            annotations=annotations,  # アノテーション追加
-            margin=dict(l=40, r=40, t=60, b=40),  # 余白
-            yaxis=dict(showticklabels=False),  # y軸ラベル非表示
-            font=dict(family='sans-serif', size=13)  # フォント設定
+            title=f"{year}年{month}月",
+            annotations=annotations,
+            margin=dict(l=40, r=40, t=60, b=40),
+            yaxis=dict(autorange='reversed', showticklabels=False),
+            font=dict(family='sans-serif', size=13)
         )
-        figs.append(fig)  # リストに追加
-    return figs, months  # グラフと月リストを返す
+        figs.append(fig)
+
+    return figs, months_out
 
 # --- Streamlit UI ---
 
@@ -215,7 +244,8 @@ if submitted or cycle_data or duration_data:  # 入力があれば処理
         })
         st.markdown("### ヒートマップカレンダー")  # セクションタイトル
         figs, months = create_calendar_heatmap_plotly(df)  # ヒートマップ作成
-        tab_labels = [f"{start_date_dt.year if m >= start_date_dt.month else start_date_dt.year+1}年{m}月" for m in months]  # タブ名
+        # months は [(year, month), ...] の順序付きリストなので、そのまま年と月を使ってラベルを作る
+        tab_labels = [f"{y}年{m}月" for (y, m) in months]
         tabs = st.tabs(tab_labels)  # タブ作成
         for i, tab in enumerate(tabs):  # 各月ごとにタブ表示
             with tab:
